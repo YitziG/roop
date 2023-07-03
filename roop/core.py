@@ -15,6 +15,9 @@ import shutil
 import argparse
 import onnxruntime
 import tensorflow
+from pathlib import Path
+import multiprocessing as mp
+import cv2
 import roop.globals
 import roop.metadata
 import roop.ui as ui
@@ -159,15 +162,53 @@ def start() -> None:
         update_status(f'Extracting frames with {fps} FPS...')
         extract_frames(roop.globals.target_path, fps)
     else:
-        update_status('Extracting frames with 30 FPS...')
-        extract_frames(roop.globals.target_path)
-    # process frame
-    temp_frame_paths = get_temp_frame_paths(roop.globals.target_path)
-    if temp_frame_paths:
-        for frame_processor in get_frame_processors_modules(roop.globals.frame_processors):
-            update_status('Progressing...', frame_processor.NAME)
-            frame_processor.process_video(roop.globals.source_path, temp_frame_paths)
-            frame_processor.post_process()
+        ui.update_status_label(value)
+
+
+def process_video_multi_cores(source_img, frame_paths):
+    n = len(frame_paths) // roop.globals.cpu_cores
+    if n > 2:
+        processes = []
+        for i in range(0, len(frame_paths), n):
+            p = POOL.apply_async(process_video, args=(source_img, frame_paths[i:i + n],))
+            processes.append(p)
+        for p in processes:
+            p.get()
+        POOL.close()
+        POOL.join()
+
+
+def start(preview_callback = None):
+    if not args.source_img or not os.path.isfile(args.source_img):
+        print("\n[WARNING] Please select an image containing a face.")
+        return
+    elif not args.target_path or not os.path.isfile(args.target_path):
+        print("\n[WARNING] Please select a video/image to swap face in.")
+        return
+    if not args.output_file:
+        target_path = args.target_path
+        args.output_file = rreplace(target_path, "/", "/swapped-", 1) if "/" in target_path else "swapped-" + target_path
+    target_path = args.target_path
+    test_face = get_face_single(cv2.imread(args.source_img))
+    if not test_face:
+        print("\n[WARNING] No face detected in source image. Please try with another one.\n")
+        return
+    if is_img(target_path):
+        if predict_image(target_path) > 0.85:
+            quit()
+        process_img(args.source_img, target_path, args.output_file)
+        status("swap successful!")
+        return
+    video_name_full = target_path.split("/")[-1]
+    video_name = os.path.splitext(video_name_full)[0]
+    output_dir = os.path.dirname(target_path) + "/" + video_name if os.path.dirname(target_path) else video_name
+    Path(output_dir).mkdir(exist_ok=True)
+    status("detecting video's FPS...")
+    fps, exact_fps = detect_fps(target_path)
+    if not args.keep_fps and fps > 30:
+        this_path = output_dir + "/" + video_name + ".mp4"
+        set_fps(target_path, this_path, 30)
+        target_path, exact_fps = this_path, 30
     else:
         update_status('Frames not found...')
         return
